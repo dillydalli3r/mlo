@@ -1,0 +1,112 @@
+[package]
+name = "mlo-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "mlo — native Rust TUI/CLI music library manager (acquire, identify, tag, organize, analyse, grade, optimize, play)"
+license = "MIT"
+repository = "https://github.com/dillydalli3r/mlo"
+keywords = ["music", "tui", "tags", "audio", "library"]
+categories = ["command-line-utilities", "multimedia::audio"]
+default-run = "mlo"
+
+[[bin]]
+name = "mlo"
+path = "src/main.rs"
+
+[lib]
+name = "mlo_tui"
+path = "src/lib.rs"
+
+[features]
+default = ["audio", "archives"]
+# In-process playback (rodio -> cpal). On Linux this needs a system audio
+# library at link time (libasound2-dev / pipewire-alsa). Disable with
+# `--no-default-features` for a dependency-free build in containers/CI.
+audio = ["dep:rodio"]
+# Archive extraction (.zip/.7z/.tar.*). Pure-ish Rust + zlib/bzip2/xz.
+archives = ["dep:zip", "dep:sevenz-rust", "dep:flate2", "dep:tar", "dep:bzip2", "dep:xz2"]
+
+[dependencies]
+# --- TUI ---
+ratatui = "0.30.2"                 # pure Rust, no system deps, active upstream
+crossterm = "0.29.0"               # cross-platform terminal backend (Win/mac/Linux)
+unicode-width = "0.2.2"            # correct column math for wide glyphs (ratatui re-uses)
+
+# --- CLI / config / errors ---
+clap = { version = "4.6.7", features = ["derive", "wrap_help"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.6"
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+
+# --- data ---
+rusqlite = { version = "0.40.2", features = ["bundled"] }  # statically links SQLite: no system dep
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }  # ~10x faster quick-hash than md5
+walkdir = "2.5.0"
+rayon = "1.12.0"
+regex = "1.11.1"
+unicode-normalization = "0.1.25"
+
+# --- tagging (read/write all containers, one API) ---
+lofty = "0.25.4"
+
+# --- decoding / analysis (pure Rust) ---
+symphonia = { version = "0.6.1", default-features = false, features = [
+    "all-meta", "opt-simd", "flac", "mp3", "aac", "alac", "isomp4", "ogg", "vorbis", "wav", "pcm",
+] }
+ebur128 = "0.1.10"                 # ITU-R BS.1770-4 / R128 per-track + true peak
+rustfft = "6.4.1"                  # BPM + chromagram key detection
+md-5 = "0.11.0"                    # FLAC STREAMINFO md5 (legacy AUDIO_MD5 check)
+
+# --- images ---
+image = { version = "0.25.10", default-features = false, features = [
+    "jpeg", "png", "webp", "gif", "bmp", "tiff", "rayon",
+] }
+fast_image_resize = { version = "6.1.0", features = ["image"] }
+
+# --- net (blocking on job threads: no async runtime in a sync TUI) ---
+ureq = { version = "3.4.2", features = ["json", "socks-proxy"] }
+
+# --- misc ---
+directories = "6.0.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+
+# --- optional: playback ---
+rodio = { version = "0.22.2", optional = true, default-features = false, features = [
+    "playback", "flac", "mp3", "mp4", "vorbis", "wav", "dither",
+] }
+
+# --- optional: archives ---
+zip = { version = "8.6.0", optional = true, default-features = false, features = ["deflate", "bzip2", "zstd", "time"] }
+sevenz-rust = { version = "0.6.1", optional = true }
+flate2 = { version = "1.1.10", optional = true }
+tar = { version = "0.4.46", optional = true }
+bzip2 = { version = "0.6.1", optional = true }
+xz2 = { version = "0.1.7", optional = true }
+id3 = "1.17.2"
+ogg = "0.9.2"
+byteorder = "1.5.0"
+crc32fast = "1.5.2"
+tracing-subscriber = { version = "0.3.23", features = ["fmt"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+# Keep unwinding: a panicking worker thread must be joinable, never abort the TUI.
+panic = "unwind"
+
+[profile.dev]
+opt-level = 1        # audio decode/analysis is unusable at -O0
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 3        # optimise dependencies even in dev builds

@@ -1,0 +1,300 @@
+name: Release
+
+# Building a v* tag (or re-running one by hand) produces the mlo release: one
+# self-contained tarball per supported Rust target (a .zip on Windows), each
+# carrying the binary plus README.md, LICENSE, CHANGELOG.md and the two install
+# scripts, a single SHA256SUMS over all of them, and a GitHub Release that
+# names them. The same run also publishes docs/ to GitHub Pages.
+#
+# The version is never typed into this file: it is read from Cargo.toml, and a
+# tag whose name disagrees with Cargo.toml fails the run before anything is
+# built, so a mistagged release cannot ship a binary that reports a version the
+# release does not.
+#
+# Targets: the five the project supports. The Linux arm64 leg uses GitHub's
+# arm64 runner (available to public repositories) rather than a cross build,
+# because the default `audio` feature links ALSA (cpal) and a cross toolchain
+# would need aarch64 ALSA development libraries installed into a container. If
+# this repository is ever made private, that leg is the one to swap for
+# `cross-rs/cross` with a matching pre-build that installs libasound2-dev:arm64.
+#
+# Pages is deployed by this workflow, from the same tag: the site is the
+# project's install front door, so it moves with the release. Pages must be
+# enabled once (Settings → Pages → Source: GitHub Actions); see RELEASING.md.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Re-running a release without re-tagging: a leg that failed, a GitHub hiccup.
+  # The version still comes from Cargo.toml, so a dispatch cannot publish a
+  # release the source does not claim.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# A tag push supersedes the dispatch still building its predecessor.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # One runner per target. fail-fast is off so a single platform's failure
+    # still leaves the others' logs intact — the release job below refuses to
+    # publish unless every leg produced its archives.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the version from Cargo.toml
+        # Cargo.toml is the one place the version is written down for the
+        # binary; on a tag push the tag must agree with it or nothing builds.
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ -z "$manifest_version" ]; then
+            echo "::error::could not read the version from Cargo.toml"; exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$tag_version" != "$manifest_version" ]; then
+              echo "::error::tag v${tag_version} does not match Cargo.toml version ${manifest_version}"
+              exit 1
+            fi
+            version="$tag_version"
+          else
+            version="$manifest_version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Add the Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install the Linux audio headers
+        # The default `audio` feature is rodio -> cpal, which links ALSA on
+        # Linux; without libasound2-dev the build fails in a sys-crate's build
+        # script rather than in our code. pkg-config is how those crates find
+        # it. macOS uses CoreAudio and Windows WASAPI, both linker-provided.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+
+      - name: Cache the crate graph
+        # Keyed per target: compiled artifacts are not portable across them.
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build and package (unix)
+        # The default build is packaged first, then (on Linux only) the min
+        # variant overwrites the binary in the same target dir — staging the
+        # first archive before that build is why the two steps live in one
+        # shell. Archive layout is a top-level
+        # `mlo-<version>-<target>[-min]/` directory so install.sh can extract to
+        # a temp dir and copy exactly one binary out of it.
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          stage() {  # $1 = "" or "-min"; copies the binary just built
+            local suffix="$1" dir="mlo-${VERSION}-${TARGET}${1}"
+            rm -rf "dist/${dir}" && mkdir -p "dist/${dir}"
+            cp "target/${TARGET}/release/mlo" "dist/${dir}/mlo"
+            cp README.md LICENSE CHANGELOG.md install.sh install.ps1 "dist/${dir}/"
+            tar -C dist -czf "dist/${dir}.tar.gz" "${dir}"
+          }
+          cargo build --release --locked --target "$TARGET"
+          stage ""
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cargo build --release --locked --no-default-features --target "$TARGET"
+            stage "-min"
+          fi
+          ls -l dist
+
+      - name: Build and package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $stage = "mlo-$($env:VERSION)-$($env:TARGET)"
+          $dir = "dist/$stage"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item "target/$($env:TARGET)/release/mlo.exe" "$dir/"
+          Copy-Item README.md,LICENSE,CHANGELOG.md,install.sh,install.ps1 $dir/
+          Compress-Archive -Path $dir -DestinationPath "dist/$stage.zip" -Force
+          Get-ChildItem dist
+
+      - name: Upload the archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlo-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  release:
+    # Every target, or nothing. A release quietly missing a platform is worse
+    # than no release: the previous asset stays under the same name and the run
+    # reads green. So this job waits on the whole matrix.
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the version from Cargo.toml
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ -z "$manifest_version" ]; then
+            echo "::error::could not read the version from Cargo.toml"; exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [ "$tag_version" != "$manifest_version" ]; then
+              echo "::error::tag v${tag_version} does not match Cargo.toml version ${manifest_version}"
+              exit 1
+            fi
+            version="$tag_version"
+          else
+            version="$manifest_version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Collect every target's archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mlo-*
+          path: dist
+          merge-multiple: true
+
+      - name: Every target must be present
+        # Matched by archive name, not by counting files: a matrix leg that
+        # produced nothing must fail the release instead of publishing the
+        # previous run's assets.
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          missing=0
+          # `test -f`, not `ls a b`: GNU ls exits non-zero when any operand is
+          # missing, and each target ships exactly one of the two extensions.
+          check() {  # $1 = target
+            if [ -f "dist/mlo-${VERSION}-$1.tar.gz" ] || [ -f "dist/mlo-${VERSION}-$1.zip" ]; then
+              echo "ok: $1"
+            else
+              echo "::error::no archive for $1 in this release"
+              missing=1
+            fi
+          }
+          for target in x86_64-pc-windows-msvc x86_64-apple-darwin aarch64-apple-darwin \
+                        x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            check "$target"
+          done
+          # The Linux min variant is part of the deliverable the install script
+          # advertises, so its absence is a failure too.
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            if [ -f "dist/mlo-${VERSION}-${target}-min.tar.gz" ]; then
+              echo "ok: ${target} -min"
+            else
+              echo "::error::no -min archive for ${target} in this release"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          shopt -s nullglob   # a platform's extension may be absent; don't hash the literal glob
+          sha256sum *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Choose the release body
+        # The 0.1.0 notes live in docs/release-notes/release-notes-<version>.md.
+        # When none exists for this version, GitHub's generated notes are used
+        # instead of shipping an empty body.
+        id: notes
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          path="docs/release-notes/release-notes-${VERSION}.md"
+          if [ -f "$path" ]; then
+            cp "$path" release-body.md
+            echo "path=release-body.md" >> "$GITHUB_OUTPUT"
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::no release notes file at $path — using generated notes"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: mlo ${{ steps.ver.outputs.version }}
+          tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: ${{ steps.notes.outputs.generate }}
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
+          draft: false
+          prerelease: false
+
+  pages:
+    # Runs on its own so the site follows a tag even while the release job is
+    # still assembling assets. This is the docs/ tree as the landing page,
+    # INSTALL.md, DEPENDENCIES.md and the release notes.
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

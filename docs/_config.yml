@@ -1,0 +1,20 @@
+# GitHub Pages configuration for the mlo documentation site.
+#
+# The site is built from this docs/ directory by the `pages` job in
+# .github/workflows/release.yml and published at
+# https://<owner>.github.io/<repo>/. Keep the theme minimal and free: the only
+# content is the landing page, INSTALL.md, DEPENDENCIES.md and the release
+# notes, so a documentation-framework theme would be more chrome than page.
+theme: jekyll-theme-minimal
+title: mlo
+description: >-
+  Native Rust TUI/CLI music library manager — acquire, identify, tag, organize,
+  analyse, grade, optimize, play.
+
+show_downloads: false
+
+# Lets `[Install](INSTALL.md)` in these pages resolve to INSTALL.html on the
+# published site instead of linking at the raw Markdown, which GitHub Pages
+# does not serve.
+plugins:
+  - jekyll-relative-links
