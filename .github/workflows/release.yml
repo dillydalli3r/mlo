@@ -307,9 +307,19 @@ jobs:
 
       - uses: actions/configure-pages@v5
 
+      # The artifact must be the BUILT site, not the docs/ tree: upload-pages-artifact
+      # serves what it is given verbatim, so docs/index.md would never become
+      # index.html. jekyll-build-pages runs the GitHub Pages Jekyll (honouring
+      # docs/_config.yml and its theme + jekyll-relative-links), which is what
+      # turns the Markdown into HTML.
+      - uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./docs
+          destination: ./_site
+
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: ./_site
 
       - id: deployment
         uses: actions/deploy-pages@v4
