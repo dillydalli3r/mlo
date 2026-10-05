@@ -26,6 +26,11 @@ on:
   push:
     tags:
       - "v*"
+    # The Pages site deploys from the default branch: the `github-pages`
+    # environment only allows the default branch to deploy, so a tag cannot.
+    # A tag push still builds the release; a main push redeploys the site.
+    branches:
+      - main
   # Re-running a release without re-tagging: a leg that failed, a GitHub hiccup.
   # The version still comes from Cargo.toml, so a dispatch cannot publish a
   # release the source does not claim.
@@ -41,6 +46,9 @@ concurrency:
 
 jobs:
   build:
+    # A release is built from a tag (or a manual dispatch); a plain main push
+    # only redeploys the Pages site below.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     # One runner per target. fail-fast is off so a single platform's failure
     # still leaves the others' logs intact — the release job below refuses to
     # publish unless every leg produced its archives.
@@ -277,9 +285,9 @@ jobs:
           prerelease: false
 
   pages:
-    # Runs on its own so the site follows a tag even while the release job is
-    # still assembling assets. This is the docs/ tree as the landing page,
-    # INSTALL.md, DEPENDENCIES.md and the release notes.
+    # The site follows the default branch: the `github-pages` environment only
+    # permits the default branch to deploy, so a tag push cannot publish it.
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       pages: write
